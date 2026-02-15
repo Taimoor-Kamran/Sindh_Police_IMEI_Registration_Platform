@@ -29,10 +29,18 @@ class DeviceCheckResponse(BaseModel):
     model: Optional[str] = None
     registration_date: Optional[str] = None
     message: Optional[str] = None
+    is_owner: bool = False
 
 
 class DeviceTransferRequest(BaseModel):
     imei: str
+    transfer_type: str
+    notes: Optional[str] = None
+
+
+class DeviceTransferOutRequest(BaseModel):
+    imei: str
+    new_owner_cnic: str
     transfer_type: str
     notes: Optional[str] = None
 
@@ -60,6 +68,7 @@ def check_device(
             brand=device.brand,
             model=device.model,
             registration_date=device.registration_date.isoformat(),
+            is_owner=device.current_owner_cnic == current_user.cnic,
         )
 
     # Device is stolen or blocked - create police alert
@@ -160,6 +169,80 @@ def transfer_device(
         "message": "Device transferred successfully",
         "imei": device.imei,
         "new_owner_cnic": device.current_owner_cnic,
+        "brand": device.brand,
+        "model": device.model,
+    }
+
+
+@router.post("/transfer-out")
+def transfer_device_out(
+    data: DeviceTransferOutRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Owner transfers their device to a new buyer by CNIC."""
+    if not validate_imei(data.imei):
+        raise HTTPException(status_code=422, detail="Invalid IMEI. Must be 15 digits and pass Luhn check")
+
+    if data.transfer_type not in VALID_TRANSFER_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Transfer type must be one of: {', '.join(sorted(VALID_TRANSFER_TYPES))}",
+        )
+
+    from app.utils.validators import validate_cnic
+    if not validate_cnic(data.new_owner_cnic):
+        raise HTTPException(status_code=422, detail="New owner CNIC must be in format XXXXX-XXXXXXX-X")
+
+    device = session.exec(select(Mobile).where(Mobile.imei == data.imei)).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    if device.status != "active":
+        raise HTTPException(status_code=400, detail=f"Cannot transfer device with status '{device.status}'")
+
+    if device.current_owner_cnic != current_user.cnic:
+        raise HTTPException(status_code=403, detail="You are not the owner of this device")
+
+    if data.new_owner_cnic == current_user.cnic:
+        raise HTTPException(status_code=400, detail="Cannot transfer to yourself")
+
+    old_cnic = device.current_owner_cnic
+
+    transfer = OwnershipHistory(
+        mobile_id=device.id,
+        imei=device.imei,
+        old_owner_cnic=old_cnic,
+        new_owner_cnic=data.new_owner_cnic,
+        transferred_by_user_id=current_user.id,
+        transfer_type=data.transfer_type,
+        notes=data.notes,
+    )
+    session.add(transfer)
+
+    device.current_owner_cnic = data.new_owner_cnic
+    session.add(device)
+
+    log_action(
+        session,
+        action_type="DEVICE_TRANSFERRED_OUT",
+        description=f"Device {data.imei} transferred by owner {current_user.cnic} to {data.new_owner_cnic}",
+        user_id=current_user.id,
+        entity_type="mobile",
+        entity_id=device.id,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    session.commit()
+    session.refresh(device)
+
+    return {
+        "message": "Device transferred to new owner successfully",
+        "imei": device.imei,
+        "old_owner_cnic": old_cnic,
+        "new_owner_cnic": data.new_owner_cnic,
         "brand": device.brand,
         "model": device.model,
     }

@@ -178,6 +178,7 @@ export interface DeviceCheckResult {
   model?: string | null;
   registration_date?: string | null;
   message?: string | null;
+  is_owner?: boolean;
 }
 
 export interface PoliceAlertRecord {
@@ -230,6 +231,8 @@ export const deviceCheckApi = {
   check: (imei: string) => api.post<DeviceCheckResult>("/device-check", { imei }),
   transfer: (data: { imei: string; transfer_type: string; notes?: string }) =>
     api.post("/device-check/transfer", data),
+  transferOut: (data: { imei: string; new_owner_cnic: string; transfer_type: string; notes?: string }) =>
+    api.post("/device-check/transfer-out", data),
 };
 
 export const adminApi = {

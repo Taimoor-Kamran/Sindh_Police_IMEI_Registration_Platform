@@ -41,8 +41,11 @@ function validateLuhn(imei: string): boolean {
 function ShopOTPTransfer() {
   const [step, setStep] = useState(1);
   const [imei, setImei] = useState("");
-  const [oldOwnerIdentifier, setOldOwnerIdentifier] = useState("");
-  const [newOwnerIdentifier, setNewOwnerIdentifier] = useState("");
+  const [checkResult, setCheckResult] = useState<DeviceCheckResult | null>(null);
+  const [oldOwnerCnic, setOldOwnerCnic] = useState("");
+  const [oldOwnerPhone, setOldOwnerPhone] = useState("");
+  const [newOwnerCnic, setNewOwnerCnic] = useState("");
+  const [newOwnerPhone, setNewOwnerPhone] = useState("");
   const [otpCode, setOtpCode] = useState("");
   const [transferType, setTransferType] = useState("SALE");
   const [notes, setNotes] = useState("");
@@ -56,11 +59,17 @@ function ShopOTPTransfer() {
   const [deviceModel, setDeviceModel] = useState("");
   const [newOwnerName, setNewOwnerName] = useState("");
 
+  const getOldOwnerIdentifier = () => oldOwnerCnic.trim() || oldOwnerPhone.trim();
+  const getNewOwnerIdentifier = () => newOwnerCnic.trim() || newOwnerPhone.trim();
+
   const reset = () => {
     setStep(1);
     setImei("");
-    setOldOwnerIdentifier("");
-    setNewOwnerIdentifier("");
+    setCheckResult(null);
+    setOldOwnerCnic("");
+    setOldOwnerPhone("");
+    setNewOwnerCnic("");
+    setNewOwnerPhone("");
     setOtpCode("");
     setTransferType("SALE");
     setNotes("");
@@ -72,14 +81,36 @@ function ShopOTPTransfer() {
     setNewOwnerName("");
   };
 
-  const handleStep1 = async (e: FormEvent) => {
+  // Step 1: Check IMEI status
+  const handleCheckImei = async (e: FormEvent) => {
     e.preventDefault();
     setError("");
+    setCheckResult(null);
     if (!imei.trim() || !validateLuhn(imei.trim())) {
       setError("Invalid IMEI. Must be 15 digits and pass Luhn check.");
       return;
     }
-    if (!oldOwnerIdentifier.trim()) {
+    setLoading(true);
+    try {
+      const res = await deviceCheckApi.check(imei.trim());
+      setCheckResult(res.data);
+      if (res.data.status === "active") {
+        setDeviceBrand(res.data.brand || "");
+        setDeviceModel(res.data.model || "");
+      }
+    } catch (err: any) {
+      setError(err.response?.data?.detail || "Failed to check device");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Step 2: Identify old owner & send OTP
+  const handleStep2 = async (e: FormEvent) => {
+    e.preventDefault();
+    setError("");
+    const identifier = getOldOwnerIdentifier();
+    if (!identifier) {
       setError("Please enter old owner's CNIC or phone number");
       return;
     }
@@ -87,13 +118,13 @@ function ShopOTPTransfer() {
     try {
       const res = await transferOtpApi.initiate({
         imei: imei.trim(),
-        old_owner_identifier: oldOwnerIdentifier.trim(),
+        old_owner_identifier: identifier,
       });
       setOldOwnerName(res.data.old_owner_name);
-      setDeviceBrand(res.data.device_brand || "");
-      setDeviceModel(res.data.device_model || "");
+      setDeviceBrand(res.data.device_brand || deviceBrand);
+      setDeviceModel(res.data.device_model || deviceModel);
       setOtpCode("");
-      setStep(2);
+      setStep(3);
     } catch (err: any) {
       setError(err.response?.data?.detail || "Failed to initiate transfer");
     } finally {
@@ -101,7 +132,8 @@ function ShopOTPTransfer() {
     }
   };
 
-  const handleStep2 = async (e: FormEvent) => {
+  // Step 3: Verify old owner OTP
+  const handleStep3 = async (e: FormEvent) => {
     e.preventDefault();
     setError("");
     if (!otpCode.trim() || otpCode.length !== 6) {
@@ -112,11 +144,11 @@ function ShopOTPTransfer() {
     try {
       await transferOtpApi.verifyOldOwner({
         imei: imei.trim(),
-        old_owner_identifier: oldOwnerIdentifier.trim(),
+        old_owner_identifier: getOldOwnerIdentifier(),
         otp_code: otpCode.trim(),
       });
       setOtpCode("");
-      setStep(3);
+      setStep(4);
     } catch (err: any) {
       setError(err.response?.data?.detail || "OTP verification failed");
     } finally {
@@ -124,10 +156,12 @@ function ShopOTPTransfer() {
     }
   };
 
-  const handleStep3 = async (e: FormEvent) => {
+  // Step 4: Identify new owner & send OTP
+  const handleStep4 = async (e: FormEvent) => {
     e.preventDefault();
     setError("");
-    if (!newOwnerIdentifier.trim()) {
+    const identifier = getNewOwnerIdentifier();
+    if (!identifier) {
       setError("Please enter new owner's CNIC or phone number");
       return;
     }
@@ -135,11 +169,11 @@ function ShopOTPTransfer() {
     try {
       const res = await transferOtpApi.sendNewOwnerOTP({
         imei: imei.trim(),
-        new_owner_identifier: newOwnerIdentifier.trim(),
+        new_owner_identifier: identifier,
       });
       setNewOwnerName(res.data.new_owner_name);
       setOtpCode("");
-      setStep(4);
+      setStep(5);
     } catch (err: any) {
       setError(err.response?.data?.detail || "Failed to send OTP to new owner");
     } finally {
@@ -147,7 +181,8 @@ function ShopOTPTransfer() {
     }
   };
 
-  const handleStep4 = async (e: FormEvent) => {
+  // Step 5: Complete transfer
+  const handleStep5 = async (e: FormEvent) => {
     e.preventDefault();
     setError("");
     if (!otpCode.trim() || otpCode.length !== 6) {
@@ -158,7 +193,7 @@ function ShopOTPTransfer() {
     try {
       await transferOtpApi.complete({
         imei: imei.trim(),
-        new_owner_identifier: newOwnerIdentifier.trim(),
+        new_owner_identifier: getNewOwnerIdentifier(),
         otp_code: otpCode.trim(),
         transfer_type: transferType,
         notes: notes || undefined,
@@ -197,16 +232,17 @@ function ShopOTPTransfer() {
   }
 
   const steps = [
-    { num: 1, label: "Identify Device" },
-    { num: 2, label: "Verify Old Owner" },
-    { num: 3, label: "New Owner" },
-    { num: 4, label: "Complete" },
+    { num: 1, label: "Check IMEI" },
+    { num: 2, label: "Old Owner" },
+    { num: 3, label: "Verify OTP" },
+    { num: 4, label: "New Owner" },
+    { num: 5, label: "Complete" },
   ];
 
   return (
     <div>
       {/* Progress indicator */}
-      <div className="flex items-center justify-between mb-8 max-w-2xl">
+      <div className="flex items-center justify-between mb-8 max-w-3xl">
         {steps.map((s, i) => (
           <div key={s.num} className="flex items-center">
             <div className="flex flex-col items-center">
@@ -225,7 +261,7 @@ function ShopOTPTransfer() {
             </div>
             {i < steps.length - 1 && (
               <div
-                className={`w-16 sm:w-24 h-0.5 mx-2 mb-5 ${
+                className={`w-12 sm:w-20 h-0.5 mx-1 mb-5 ${
                   step > s.num ? "bg-green-500" : "bg-gray-200"
                 }`}
               />
@@ -241,34 +277,129 @@ function ShopOTPTransfer() {
       )}
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+        {/* Step 1: Check IMEI */}
         {step === 1 && (
-          <form onSubmit={handleStep1} className="space-y-4 max-w-lg">
+          <div className="space-y-4 max-w-lg">
             <h3 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
               <Search className="w-5 h-5 text-primary" />
-              Step 1: Identify Device & Old Owner
+              Step 1: Check Device IMEI
             </h3>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Device IMEI
-              </label>
-              <input
-                type="text"
-                value={imei}
-                onChange={(e) => setImei(e.target.value.replace(/\D/g, "").slice(0, 15))}
-                placeholder="Enter 15-digit IMEI"
-                maxLength={15}
-                className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors"
-              />
+            {!checkResult ? (
+              <form onSubmit={handleCheckImei} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Device IMEI
+                  </label>
+                  <input
+                    type="text"
+                    value={imei}
+                    onChange={(e) => setImei(e.target.value.replace(/\D/g, "").slice(0, 15))}
+                    placeholder="Enter 15-digit IMEI"
+                    maxLength={15}
+                    className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="bg-primary text-white font-semibold py-2.5 px-6 rounded-lg hover:bg-primary-light transition-colors disabled:opacity-60 flex items-center gap-2"
+                >
+                  {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                  Check IMEI
+                </button>
+              </form>
+            ) : (
+              <div className="space-y-4">
+                {checkResult.status === "not_registered" && (
+                  <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
+                    <p className="text-sm text-gray-600 font-medium">
+                      IMEI <span className="font-mono">{imei}</span> is not registered in the system. Cannot proceed with transfer.
+                    </p>
+                  </div>
+                )}
+                {checkResult.status === "active" && (
+                  <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
+                    <div className="flex items-center gap-2 mb-3">
+                      <CheckCircle className="w-5 h-5 text-green-600" />
+                      <span className="text-sm font-semibold text-green-700">Device is Clean — Ready for Transfer</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-sm">
+                      <div><span className="text-gray-500">Brand:</span> <span className="font-medium text-gray-800">{checkResult.brand || "N/A"}</span></div>
+                      <div><span className="text-gray-500">Model:</span> <span className="font-medium text-gray-800">{checkResult.model || "N/A"}</span></div>
+                      <div className="col-span-2">
+                        <span className="text-gray-500">Registered:</span> <span className="font-medium text-gray-800">{checkResult.registration_date ? new Date(checkResult.registration_date).toLocaleDateString() : "N/A"}</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {(checkResult.status === "stolen" || checkResult.status === "blocked") && (
+                  <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
+                    <div className="flex items-center gap-2 mb-2">
+                      <ShieldAlert className="w-5 h-5 text-red-600" />
+                      <span className="text-sm font-semibold text-red-700 uppercase">{checkResult.status} Device</span>
+                    </div>
+                    <p className="text-sm text-red-600">{checkResult.message}</p>
+                    <p className="text-sm text-red-600 mt-1 font-medium">Transfer is not allowed for this device.</p>
+                  </div>
+                )}
+                <div className="flex gap-3">
+                  {checkResult.status === "active" && (
+                    <button
+                      onClick={() => setStep(2)}
+                      className="bg-primary text-white font-semibold py-2.5 px-6 rounded-lg hover:bg-primary-light transition-colors flex items-center gap-2"
+                    >
+                      <ArrowRightLeft className="w-4 h-4" />
+                      Proceed to Transfer
+                    </button>
+                  )}
+                  <button
+                    onClick={() => { setCheckResult(null); setImei(""); setError(""); }}
+                    className="text-sm text-primary hover:underline py-2.5"
+                  >
+                    Check another IMEI
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Step 2: Identify Old Owner & Send OTP */}
+        {step === 2 && (
+          <form onSubmit={handleStep2} className="space-y-4 max-w-lg">
+            <h3 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
+              <Search className="w-5 h-5 text-primary" />
+              Step 2: Identify Old Owner & Send OTP
+            </h3>
+            <div className="text-sm text-gray-500">
+              Device: {deviceBrand} {deviceModel} (IMEI: <span className="font-mono">{imei}</span>)
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Old Owner CNIC or Phone
+                Old Owner CNIC
               </label>
               <input
                 type="text"
-                value={oldOwnerIdentifier}
-                onChange={(e) => setOldOwnerIdentifier(e.target.value)}
-                placeholder="e.g. 12345-6789012-3 or 03001234567"
+                value={oldOwnerCnic}
+                onChange={(e) => setOldOwnerCnic(e.target.value)}
+                placeholder="XXXXX-XXXXXXX-X"
+                className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors"
+              />
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="flex-1 h-px bg-gray-200" />
+              <span className="text-xs text-gray-400 uppercase">or</span>
+              <div className="flex-1 h-px bg-gray-200" />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Old Owner Phone Number
+              </label>
+              <input
+                type="text"
+                value={oldOwnerPhone}
+                onChange={(e) => setOldOwnerPhone(e.target.value)}
+                placeholder="03XX-XXXXXXX"
                 className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors"
               />
             </div>
@@ -283,11 +414,12 @@ function ShopOTPTransfer() {
           </form>
         )}
 
-        {step === 2 && (
-          <form onSubmit={handleStep2} className="space-y-4 max-w-lg">
+        {/* Step 3: Verify Old Owner OTP */}
+        {step === 3 && (
+          <form onSubmit={handleStep3} className="space-y-4 max-w-lg">
             <h3 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
               <KeyRound className="w-5 h-5 text-primary" />
-              Step 2: Verify Old Owner OTP
+              Step 3: Verify Old Owner OTP
             </h3>
             <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-700">
               OTP sent to <strong>{oldOwnerName}</strong>. Ask the old owner for the 6-digit code.
@@ -319,24 +451,42 @@ function ShopOTPTransfer() {
           </form>
         )}
 
-        {step === 3 && (
-          <form onSubmit={handleStep3} className="space-y-4 max-w-lg">
+        {/* Step 4: Identify New Owner & Send OTP */}
+        {step === 4 && (
+          <form onSubmit={handleStep4} className="space-y-4 max-w-lg">
             <h3 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
               <ArrowRightLeft className="w-5 h-5 text-primary" />
-              Step 3: Identify New Owner
+              Step 4: Identify New Owner
             </h3>
             <div className="p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-700">
               Old owner <strong>{oldOwnerName}</strong> verified successfully.
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                New Owner CNIC or Phone
+                New Owner CNIC
               </label>
               <input
                 type="text"
-                value={newOwnerIdentifier}
-                onChange={(e) => setNewOwnerIdentifier(e.target.value)}
-                placeholder="e.g. 55555-6666666-7 or 03201234567"
+                value={newOwnerCnic}
+                onChange={(e) => setNewOwnerCnic(e.target.value)}
+                placeholder="XXXXX-XXXXXXX-X"
+                className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors"
+              />
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="flex-1 h-px bg-gray-200" />
+              <span className="text-xs text-gray-400 uppercase">or</span>
+              <div className="flex-1 h-px bg-gray-200" />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                New Owner Phone Number
+              </label>
+              <input
+                type="text"
+                value={newOwnerPhone}
+                onChange={(e) => setNewOwnerPhone(e.target.value)}
+                placeholder="03XX-XXXXXXX"
                 className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors"
               />
             </div>
@@ -351,11 +501,12 @@ function ShopOTPTransfer() {
           </form>
         )}
 
-        {step === 4 && (
-          <form onSubmit={handleStep4} className="space-y-4 max-w-lg">
+        {/* Step 5: Complete Transfer */}
+        {step === 5 && (
+          <form onSubmit={handleStep5} className="space-y-4 max-w-lg">
             <h3 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
               <CheckCircle className="w-5 h-5 text-primary" />
-              Step 4: Complete Transfer
+              Step 5: Complete Transfer
             </h3>
             <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-700">
               OTP sent to <strong>{newOwnerName}</strong>. Ask the new owner for the 6-digit code.
@@ -420,7 +571,7 @@ function ShopOTPTransfer() {
   );
 }
 
-// ─── Citizen Check & Transfer (existing flow) ───
+// ─── Citizen Check & Transfer ───
 
 function CitizenTransfer() {
   const [transfers, setTransfers] = useState<TransferRecord[]>([]);
@@ -431,11 +582,13 @@ function CitizenTransfer() {
   const [checkResult, setCheckResult] = useState<DeviceCheckResult | null>(null);
   const [checkError, setCheckError] = useState("");
 
+  // Transfer fields
+  const [newOwnerCnic, setNewOwnerCnic] = useState("");
   const [transferType, setTransferType] = useState("SALE");
   const [notes, setNotes] = useState("");
   const [transferring, setTransferring] = useState(false);
   const [transferError, setTransferError] = useState("");
-  const [success, setSuccess] = useState(false);
+  const [success, setSuccess] = useState("");
 
   useEffect(() => {
     transferApi.list().then((res) => setTransfers(res.data)).catch(() => {}).finally(() => setLoadingHistory(false));
@@ -445,7 +598,7 @@ function CitizenTransfer() {
     e.preventDefault();
     setCheckError("");
     setCheckResult(null);
-    setSuccess(false);
+    setSuccess("");
     if (!imei.trim()) { setCheckError("Please enter an IMEI number"); return; }
     if (!validateLuhn(imei.trim())) { setCheckError("Invalid IMEI. Must be 15 digits and pass Luhn check."); return; }
     setChecking(true);
@@ -459,13 +612,40 @@ function CitizenTransfer() {
     }
   };
 
-  const handleTransfer = async (e: FormEvent) => {
+  const handleTransferOut = async (e: FormEvent) => {
+    e.preventDefault();
+    setTransferError("");
+    if (!newOwnerCnic.trim()) { setTransferError("Please enter the new buyer's CNIC"); return; }
+    setTransferring(true);
+    try {
+      await deviceCheckApi.transferOut({
+        imei: imei.trim(),
+        new_owner_cnic: newOwnerCnic.trim(),
+        transfer_type: transferType,
+        notes: notes || undefined,
+      });
+      setSuccess("Device transferred to new owner successfully!");
+      setCheckResult(null);
+      setImei("");
+      setNewOwnerCnic("");
+      setNotes("");
+      setTransferType("SALE");
+      const res = await transferApi.list();
+      setTransfers(res.data);
+    } catch (err: any) {
+      setTransferError(err.response?.data?.detail || "Transfer failed");
+    } finally {
+      setTransferring(false);
+    }
+  };
+
+  const handleTransferIn = async (e: FormEvent) => {
     e.preventDefault();
     setTransferError("");
     setTransferring(true);
     try {
       await deviceCheckApi.transfer({ imei: imei.trim(), transfer_type: transferType, notes: notes || undefined });
-      setSuccess(true);
+      setSuccess("Device transferred to your name successfully!");
       setCheckResult(null);
       setImei("");
       setNotes("");
@@ -479,14 +659,14 @@ function CitizenTransfer() {
     }
   };
 
-  const resetCheck = () => { setCheckResult(null); setCheckError(""); setTransferError(""); setImei(""); setSuccess(false); };
+  const resetCheck = () => { setCheckResult(null); setCheckError(""); setTransferError(""); setImei(""); setNewOwnerCnic(""); setSuccess(""); };
 
   return (
     <div>
       {success && (
         <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-xl flex items-center gap-3">
           <CheckCircle className="w-5 h-5 text-green-600" />
-          <p className="text-sm text-green-700 font-medium">Device transferred to your name successfully!</p>
+          <p className="text-sm text-green-700 font-medium">{success}</p>
         </div>
       )}
 
@@ -524,7 +704,9 @@ function CitizenTransfer() {
               <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
                 <div className="flex items-center gap-2 mb-3">
                   <CheckCircle className="w-5 h-5 text-green-600" />
-                  <span className="text-sm font-semibold text-green-700">Device is Clean</span>
+                  <span className="text-sm font-semibold text-green-700">
+                    Device is Clean {checkResult.is_owner && "— You are the owner"}
+                  </span>
                 </div>
                 <div className="grid grid-cols-2 gap-2 text-sm">
                   <div><span className="text-gray-500">Brand:</span> <span className="font-medium text-gray-800">{checkResult.brand || "N/A"}</span></div>
@@ -549,17 +731,64 @@ function CitizenTransfer() {
         )}
       </div>
 
-      {checkResult?.status === "active" && (
+      {/* Owner: Transfer to New Buyer */}
+      {checkResult?.status === "active" && checkResult.is_owner && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 mb-6">
           <h2 className="text-lg font-semibold text-gray-800 mb-4 flex items-center gap-2">
             <ArrowRightLeft className="w-5 h-5 text-primary" />
-            Step 2: Transfer to Your Name
+            Step 2: Transfer to New Buyer
+          </h2>
+          <p className="text-sm text-gray-500 mb-4">
+            You own this device ({checkResult.brand} {checkResult.model}). Enter the new buyer&apos;s CNIC to transfer ownership.
+          </p>
+          {transferError && (
+            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600">{transferError}</div>
+          )}
+          <form onSubmit={handleTransferOut} className="space-y-4 max-w-lg">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">New Buyer CNIC *</label>
+              <input
+                type="text"
+                value={newOwnerCnic}
+                onChange={(e) => setNewOwnerCnic(e.target.value)}
+                placeholder="XXXXX-XXXXXXX-X"
+                className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Transfer Type</label>
+              <select value={transferType} onChange={(e) => setTransferType(e.target.value)} className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors bg-white">
+                {TRANSFER_TYPES.map((t) => (<option key={t} value={t}>{t}</option>))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Notes (optional)</label>
+              <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Transfer details..." rows={2} className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors resize-none" />
+            </div>
+            <div className="flex items-center gap-2 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+              <AlertTriangle className="w-4 h-4 text-yellow-600 shrink-0" />
+              <p className="text-xs text-yellow-700">By proceeding, you confirm that this device is being legally transferred to the new buyer.</p>
+            </div>
+            <button type="submit" disabled={transferring} className="bg-primary text-white font-semibold py-2.5 px-6 rounded-lg hover:bg-primary-light transition-colors disabled:opacity-60 flex items-center gap-2">
+              {transferring ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRightLeft className="w-4 h-4" />}
+              Transfer to New Buyer
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* Not owner: Claim device to your name */}
+      {checkResult?.status === "active" && !checkResult.is_owner && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 mb-6">
+          <h2 className="text-lg font-semibold text-gray-800 mb-4 flex items-center gap-2">
+            <ArrowRightLeft className="w-5 h-5 text-primary" />
+            Step 2: Claim Device to Your Name
           </h2>
           <p className="text-sm text-gray-500 mb-4">This device ({checkResult.brand} {checkResult.model}) will be transferred to your CNIC.</p>
           {transferError && (
             <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600">{transferError}</div>
           )}
-          <form onSubmit={handleTransfer} className="space-y-4 max-w-lg">
+          <form onSubmit={handleTransferIn} className="space-y-4 max-w-lg">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Transfer Type</label>
               <select value={transferType} onChange={(e) => setTransferType(e.target.value)} className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors bg-white">
@@ -606,12 +835,12 @@ export default function TransferPage() {
     <div>
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-gray-800">
-          {isShop ? "OTP Transfer (Shopkeeper)" : "Check & Transfer Device"}
+          {isShop ? "OTP Transfer (Shopkeeper)" : "Transfer Device Ownership"}
         </h1>
         <p className="text-gray-500 mt-1">
           {isShop
             ? "Transfer device ownership with 2-factor OTP verification from both parties"
-            : "Check a device IMEI status before transferring ownership to your name"}
+            : "Check device IMEI and transfer ownership to a new buyer or claim a device"}
         </p>
       </div>
 
